@@ -15,13 +15,33 @@ class RobotWebRTCClient {
         this.mediaRecorder = null;
         this.isRecording = false;
         
+        // 重连机制
+        this.reconnectAttempts = 0;
+        this.maxReconnectAttempts = 10;
+        this.reconnectDelay = 1000;
+        this.reconnectTimer = null;
+        this.shouldReconnect = true;
+        this.isReconnecting = false; // 添加重连状态标记
+        
+        // 心跳机制
+        this.pingInterval = null;
+        this.pingIntervalMs = 25000; // 25秒发送一次心跳
+        this.lastPongTime = Date.now();
+        
         // 自动检测服务器地址
         this.defaultServerUrl = this.getDefaultServerUrl();
         
-        // ICE服务器配置
+        // ICE服务器配置 - 添加更多STUN服务器提高连接成功率
         this.iceServers = [
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' },
+            { urls: 'stun:stun2.l.google.com:19302' },
+            { urls: 'stun:stun3.l.google.com:19302' },
+            { urls: 'stun:stun4.l.google.com:19302' },
+            // 阿里云STUN服务器
+            { urls: 'stun:stun.qq.com:3478' },
+            // 腾讯云STUN服务器  
+            { urls: 'stun:stun.miwifi.com:3478' },
             // 外网连接时可能需要TURN服务器
             // { 
             //     urls: 'turn:your-turn-server.com:3478',
@@ -121,25 +141,35 @@ class RobotWebRTCClient {
             this.log('请输入信令服务器地址', 'error');
             return;
         }
-        
+
+        this.shouldReconnect = true;
+        this.connectToServer(serverUrl);
+    }
+    
+    connectToServer(serverUrl) {
         try {
-            this.log(`正在连接到服务器: ${serverUrl}`, 'info');
+            this.log(`正在连接到服务器: ${serverUrl} (尝试 ${this.reconnectAttempts + 1})`, 'info');
             this.updateConnectionStatus('connecting');
             
             this.websocket = new WebSocket(serverUrl);
             this.websocket.onopen = () => this.onWebSocketOpen();
             this.websocket.onmessage = (event) => this.onWebSocketMessage(event);
-            this.websocket.onclose = () => this.onWebSocketClose();
+            this.websocket.onclose = (event) => this.onWebSocketClose(event);
             this.websocket.onerror = (error) => this.onWebSocketError(error);
             
         } catch (error) {
             this.log(`连接失败: ${error.message}`, 'error');
             this.updateConnectionStatus('disconnected');
+            this.scheduleReconnect();
         }
     }
     
     async disconnect() {
         this.log('正在断开连接...', 'info');
+        this.shouldReconnect = false;
+        
+        // 清理定时器
+        this.clearTimers();
         
         if (this.statsInterval) {
             clearInterval(this.statsInterval);
@@ -169,6 +199,12 @@ class RobotWebRTCClient {
         this.log('WebSocket连接已建立', 'success');
         this.updateConnectionStatus('connected');
         this.isConnected = true;
+        const wasReconnecting = this.isReconnecting;
+        this.reconnectAttempts = 0;
+        this.isReconnecting = false;
+        
+        // 启动心跳
+        this.startHeartbeat();
         
         // 注册为Web客户端
         this.registerClient();
@@ -180,22 +216,44 @@ class RobotWebRTCClient {
         
         // 刷新可用房间
         this.refreshRooms();
+        
+        // 如果是重连且之前有房间连接，尝试重新加入
+        if (this.currentRoom && wasReconnecting) {
+            this.log(`重连后尝试重新加入房间: ${this.currentRoom}`, 'info');
+            setTimeout(() => {
+                this.joinRoom(this.currentRoom);
+            }, 1000); // 延迟1秒确保服务器注册完成
+        }
     }
     
     onWebSocketMessage(event) {
         try {
             const message = JSON.parse(event.data);
+            
+            // 处理心跳响应
+            if (message.type === 'pong') {
+                this.lastPongTime = Date.now();
+                return;
+            }
+            
             this.handleSignalingMessage(message);
         } catch (error) {
             this.log(`解析消息失败: ${error.message}`, 'error');
         }
     }
     
-    onWebSocketClose() {
-        this.log('WebSocket连接已关闭', 'warning');
+    onWebSocketClose(event) {
+        this.log(`WebSocket连接已关闭 (代码: ${event.code}, 原因: ${event.reason})`, 'warning');
         this.updateConnectionStatus('disconnected');
         this.isConnected = false;
+        this.clearTimers();
         this.resetUI();
+        
+        // 自动重连
+        if (this.shouldReconnect) {
+            this.isReconnecting = true; // 标记为重连状态
+            this.scheduleReconnect();
+        }
     }
     
     onWebSocketError(error) {
@@ -255,11 +313,56 @@ class RobotWebRTCClient {
                 
             case 'room_joined':
                 this.log(`已加入房间: ${message.roomId}`, 'success');
+                this.currentRoom = message.roomId;
+                // 检查房间状态
+                if (message.roomStatus) {
+                    if (!message.roomStatus.hasRobot) {
+                        this.log('房间中没有机器人，等待机器人连接...', 'warning');
+                    } else if (message.roomStatus.robotDisconnected) {
+                        this.log('机器人暂时断线，等待重连...', 'warning');
+                    }
+                }
+                break;
+                
+            case 'room_status':
+                if (message.status === 'waiting_robot') {
+                    this.log(`房间状态: ${message.message}`, 'warning');
+                } else if (message.status === 'no_robot') {
+                    this.log(`房间状态: ${message.message}`, 'error');
+                    // 清空房间选择，让用户重新选择
+                    this.elements.roomSelection.value = '';
+                    this.refreshRooms();
+                }
+                break;
+                
+            case 'robot_disconnected':
+                this.log(`机器人断开连接: ${message.message}`, 'warning');
+                this.updateWebRTCStatus('waiting');
+                // 保持连接，等待机器人重连
+                break;
+                
+            case 'robot_reconnected':
+                this.log(`机器人重连成功: ${message.message}`, 'success');
+                // 机器人重连后，可能需要重新建立WebRTC连接
+                if (this.peerConnection) {
+                    this.peerConnection.close();
+                }
+                await this.setupWebRTC();
+                await this.createOffer();
+                break;
+                
+            case 'room_closed':
+                this.log(`房间已关闭: ${message.message}`, 'error');
+                this.updateWebRTCStatus('disconnected');
+                this.currentRoom = null;
+                this.elements.roomSelection.value = '';
+                this.refreshRooms();
                 break;
                 
             case 'peer_joined':
                 this.remoteClientId = message.peerId;
-                this.log(`机器人已连接: ${this.remoteClientId}`, 'success');
+                let robotInfo = message.robotId ? ` (${message.robotId})` : '';
+                this.log(`机器人已连接: ${this.remoteClientId}${robotInfo}`, 'success');
                 await this.setupWebRTC();
                 await this.createOffer();
                 break;
@@ -300,19 +403,42 @@ class RobotWebRTCClient {
             rooms.forEach(room => {
                 const option = document.createElement('option');
                 option.value = room.roomId;
-                option.textContent = `${room.robotId} (房间: ${room.roomId})`;
+                
+                if (room.status === 'available') {
+                    option.textContent = `✅ ${room.robotId} (房间: ${room.roomId})`;
+                } else if (room.status === 'robot_disconnected' || room.status === 'disconnected') {
+                    option.textContent = `⚠️ ${room.robotId || '机器人'} - 断线重连中 (房间: ${room.roomId})`;
+                    option.style.color = '#ff9800';
+                } else {
+                    option.textContent = `${room.robotId} (房间: ${room.roomId})`;
+                }
+                
+                // 如果当前选中的是这个房间，保持选中状态
+                if (this.currentRoom === room.roomId) {
+                    option.selected = true;
+                }
+                
                 select.appendChild(option);
             });
             
             // 添加选择事件
             select.onchange = (e) => {
-                if (e.target.value) {
+                if (e.target.value && e.target.value !== this.currentRoom) {
                     this.joinRoom(e.target.value);
                 }
             };
         }
         
-        this.log(`找到 ${rooms.length} 个可用机器人`, 'info');
+        // 统计可用和断线的机器人数量
+        const available = rooms.filter(r => r.status === 'available').length;
+        const disconnected = rooms.filter(r => r.status === 'robot_disconnected' || r.status === 'disconnected').length;
+        
+        let statusMsg = `找到 ${rooms.length} 个机器人`;
+        if (available > 0) statusMsg += ` (${available} 个在线`;
+        if (disconnected > 0) statusMsg += `, ${disconnected} 个断线重连中`;
+        if (available > 0) statusMsg += ')';
+        
+        this.log(statusMsg, 'info');
     }
     
     async setupWebRTC() {
@@ -429,6 +555,7 @@ class RobotWebRTCClient {
             this.updateWebRTCStatus('connected');
         } else if (state === 'disconnected' || state === 'failed') {
             this.updateWebRTCStatus('disconnected');
+            this.log('WebRTC连接失败，可能是网络问题或ICE连接失败', 'error');
         }
     }
     
@@ -436,6 +563,28 @@ class RobotWebRTCClient {
         const state = this.peerConnection.iceConnectionState;
         this.log(`ICE连接状态: ${state}`, 'info');
         this.elements.statIceState.textContent = state;
+        
+        // 添加详细的ICE状态处理
+        switch(state) {
+            case 'checking':
+                this.log('正在检查ICE连接...', 'info');
+                break;
+            case 'connected':
+                this.log('ICE连接成功建立', 'success');
+                break;
+            case 'completed':
+                this.log('ICE连接完成', 'success');
+                break;
+            case 'failed':
+                this.log('ICE连接失败 - 可能需要TURN服务器', 'error');
+                break;
+            case 'disconnected':
+                this.log('ICE连接断开', 'warning');
+                break;
+            case 'closed':
+                this.log('ICE连接已关闭', 'info');
+                break;
+        }
     }
     
     startStatsMonitoring() {
@@ -659,9 +808,14 @@ class RobotWebRTCClient {
             case 'connecting':
                 statusElement.textContent = 'WebRTC连接中';
                 break;
+            case 'waiting':
+                statusElement.textContent = 'WebRTC等待中';
+                break;
             case 'disconnected':
                 statusElement.textContent = 'WebRTC未连接';
                 break;
+            default:
+                statusElement.textContent = `WebRTC ${status}`;
         }
     }
     
@@ -713,6 +867,60 @@ class RobotWebRTCClient {
     clearLog() {
         this.elements.logMessages.innerHTML = '';
         this.log('日志已清空', 'info');
+    }
+    
+    // ==================== 心跳和重连机制 ====================
+    
+    startHeartbeat() {
+        this.clearTimers();
+        
+        this.pingInterval = setInterval(() => {
+            if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
+                this.sendSignalingMessage({ type: 'ping', timestamp: Date.now() });
+                
+                // 检查是否超时
+                if (Date.now() - this.lastPongTime > 60000) { // 60秒超时
+                    this.log('心跳超时，重新连接...', 'warning');
+                    this.websocket.close();
+                }
+            }
+        }, this.pingIntervalMs);
+    }
+    
+    clearTimers() {
+        if (this.pingInterval) {
+            clearInterval(this.pingInterval);
+            this.pingInterval = null;
+        }
+        
+        if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+            this.reconnectTimer = null;
+        }
+    }
+    
+    scheduleReconnect() {
+        if (!this.shouldReconnect || this.reconnectAttempts >= this.maxReconnectAttempts) {
+            this.log('停止重连尝试', 'warning');
+            return;
+        }
+        
+        this.reconnectAttempts++;
+        const delay = Math.min(this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1), 30000);
+        
+        this.log(`${delay / 1000}秒后尝试重连...`, 'info');
+        
+        this.reconnectTimer = setTimeout(() => {
+            if (this.shouldReconnect) {
+                const serverUrl = this.elements.serverUrl.value.trim();
+                this.connectToServer(serverUrl);
+            }
+        }, delay);
+    }
+    
+    resetReconnect() {
+        this.reconnectAttempts = 0;
+        this.clearTimers();
     }
 }
 

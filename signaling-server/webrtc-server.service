@@ -1,0 +1,22 @@
+[Unit]
+Description=WebRTC Signaling Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/develop/webrtc_demo-main/signaling-server
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=10
+StandardOutput=append:/root/develop/webrtc_demo-main/signaling-server/server.log
+StandardError=append:/root/develop/webrtc_demo-main/signaling-server/server.log
+
+# 环境变量
+Environment=NODE_ENV=production
+Environment=PORT=3001
+Environment=HOST=0.0.0.0
+Environment=EXTERNAL_IP=123.56.125.236
+
+[Install]
+WantedBy=multi-user.target
