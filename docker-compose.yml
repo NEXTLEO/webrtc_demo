@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  # 集成服务器 (信令服务器 + Web客户端)
+  integrated-server:
+    build: 
+      context: ./signaling-server
+      dockerfile: Dockerfile.integrated
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+    volumes:
+      - ./web-client:/app/web-client:ro
+    restart: unless-stopped
+    networks:
+      - webrtc-network
+
+  # 可选: TURN服务器 (外网连接时需要)
+  coturn:
+    image: coturn/coturn:latest
+    ports:
+      - "3478:3478"
+      - "3478:3478/udp"
+      - "49152-65535:49152-65535/udp"
+    environment:
+      - TURN_USERNAME=webrtc
+      - TURN_PASSWORD=changeme
+    command: >
+      turnserver
+      --listening-port=3478
+      --external-ip=$$(curl -s http://checkip.amazonaws.com)
+      --user=webrtc:changeme
+      --realm=webrtc.example.com
+      --log-file=stdout
+      --verbose
+    restart: unless-stopped
+    networks:
+      - webrtc-network
+
+networks:
+  webrtc-network:
+    driver: bridge

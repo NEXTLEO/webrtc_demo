@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>机器人远程监控</title>
+    <link rel="stylesheet" href="styles.css">
+
+    <script id="auto-config-script">
+        // 自动配置服务器地址
+        document.addEventListener('DOMContentLoaded', function() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const host = window.location.host;
+            const serverUrl = protocol + '//' + host;
+            
+            const serverUrlInput = document.getElementById('server-url');
+            if (serverUrlInput && !serverUrlInput.value) {
+                serverUrlInput.value = serverUrl;
+            }
+        });
+    </script>
+
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#2196F3">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🤖 机器人远程监控系统</h1>
+            <div class="status-bar">
+                <span id="connection-status" class="status disconnected">未连接</span>
+                <span id="webrtc-status" class="status disconnected">WebRTC未连接</span>
+            </div>
+        </header>
+
+        <main>
+            <!-- 连接配置面板 -->
+            <div id="connection-panel" class="panel">
+                <h2>连接配置</h2>
+                <div class="form-group">
+                    <label for="server-url">信令服务器地址:</label>
+                    <input type="text" id="server-url" value="ws://localhost:3001" placeholder="ws://服务器地址:端口">
+                </div>
+                <div class="form-group">
+                    <label for="room-selection">选择机器人:</label>
+                    <select id="room-selection">
+                        <option value="">点击刷新获取可用机器人</option>
+                    </select>
+                    <button id="refresh-rooms" type="button">🔄 刷新</button>
+                </div>
+                <div class="button-group">
+                    <button id="connect-btn" type="button">连接服务器</button>
+                    <button id="disconnect-btn" type="button" disabled>断开连接</button>
+                </div>
+            </div>
+
+            <!-- 视频显示区域 -->
+            <div id="video-panel" class="panel">
+                <h2>实时视频</h2>
+                <div class="video-container">
+                    <video id="remote-video" autoplay playsinline muted></video>
+                    <div id="video-overlay" class="video-overlay">
+                        <div class="overlay-content">
+                            <p>等待视频流...</p>
+                            <div class="spinner"></div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- 视频控制 -->
+                <div class="video-controls">
+                    <button id="fullscreen-btn" type="button" disabled>🔍 全屏</button>
+                    <button id="screenshot-btn" type="button" disabled>📷 截图</button>
+                    <button id="record-btn" type="button" disabled>🎥 录制</button>
+                    <span class="video-info">
+                        <span id="video-resolution">-</span> | 
+                        <span id="video-fps">- fps</span> | 
+                        <span id="video-bitrate">- kbps</span>
+                    </span>
+                </div>
+            </div>
+
+            <!-- 音频控制面板 -->
+            <div id="audio-panel" class="panel">
+                <h2>音频控制</h2>
+                <div class="audio-controls">
+                    <button id="mute-btn" type="button">🔊 静音</button>
+                    <label for="volume-slider">音量:</label>
+                    <input type="range" id="volume-slider" min="0" max="100" value="50">
+                    <span id="volume-display">50%</span>
+                </div>
+            </div>
+
+            <!-- 统计信息面板 -->
+            <div id="stats-panel" class="panel">
+                <h2>连接统计</h2>
+                <div class="stats-grid">
+                    <div class="stat-item">
+                        <span class="stat-label">连接状态:</span>
+                        <span id="stat-connection-state">-</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">ICE状态:</span>
+                        <span id="stat-ice-state">-</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">延迟:</span>
+                        <span id="stat-latency">- ms</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">丢包率:</span>
+                        <span id="stat-packet-loss">- %</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">接收带宽:</span>
+                        <span id="stat-bandwidth">- kbps</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">帧率:</span>
+                        <span id="stat-framerate">- fps</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 日志面板 -->
+            <div id="log-panel" class="panel collapsible">
+                <h2 onclick="togglePanel('log-content')">📋 日志 <span class="toggle-icon">▼</span></h2>
+                <div id="log-content" class="panel-content">
+                    <div class="log-controls">
+                        <button id="clear-log" type="button">清空日志</button>
+                        <label>
+                            <input type="checkbox" id="auto-scroll" checked> 自动滚动
+                        </label>
+                    </div>
+                    <div id="log-messages" class="log-messages"></div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="webrtc-client.js"></script>
+</body>
+</html>

@@ -1,0 +1,16 @@
+{
+  "name": "机器人远程监控",
+  "short_name": "机器人监控",
+  "description": "WebRTC机器人远程音视频监控系统",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f5f5",
+  "theme_color": "#2196F3",
+  "icons": [
+    {
+      "src": "favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}

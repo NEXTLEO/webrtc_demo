@@ -1,0 +1,24 @@
+FROM node:18-alpine
+
+WORKDIR /app
+
+# 复制package.json和依赖安装
+COPY package*.json ./
+RUN npm ci --only=production
+
+# 复制服务器代码
+COPY . .
+
+# 复制Web客户端代码
+COPY ../web-client ./web-client
+
+# 构建Web客户端到public目录
+RUN npm run build
+
+EXPOSE 3001
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD node -e "http.get('http://localhost:3001/api/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"
+
+CMD ["npm", "start"]
